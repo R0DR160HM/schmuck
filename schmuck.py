@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Hunsrik Language RAG System for Gemma 3
-Extracts text from PDFs, creates a vector store, and enables RAG queries
+Extracts text from PDFs and TXT files, creates a vector store, and enables RAG queries
 """
 
 import os
@@ -15,7 +15,7 @@ from datetime import datetime
 # ---------- CONFIG ----------
 EMBED_MODEL = "embeddinggemma"
 GEN_MODEL = "gemma3n:e2b"
-PDF_DIR = "pdfs"
+RESOURCES_DIR = "resources"  # Directory containing PDF and TXT files
 VECTOR_STORE_FILE = "hunsrik_vectors.json"
 CHUNK_SIZE = 500  # characters per chunk
 CHUNK_OVERLAP = 50  # overlap between chunks
@@ -40,6 +40,28 @@ class HunsrikRAG:
                     if page_text:
                         text += page_text + "\n"
                 print(f"   ✓ Extracted {len(pdf_reader.pages)} pages")
+        except Exception as e:
+            print(f"   ✗ Error: {e}")
+        return text
+    
+    def extract_text_from_txt(self, txt_path: str) -> str:
+        """Extract text from a TXT file"""
+        print(f"📝 Reading text from: {os.path.basename(txt_path)}")
+        text = ""
+        try:
+            with open(txt_path, 'r', encoding='utf-8') as file:
+                text = file.read()
+                line_count = text.count('\n') + 1
+                print(f"   ✓ Read {line_count} lines")
+        except UnicodeDecodeError:
+            # Try with different encoding
+            try:
+                with open(txt_path, 'r', encoding='latin-1') as file:
+                    text = file.read()
+                    line_count = text.count('\n') + 1
+                    print(f"   ✓ Read {line_count} lines (latin-1 encoding)")
+            except Exception as e:
+                print(f"   ✗ Error: {e}")
         except Exception as e:
             print(f"   ✗ Error: {e}")
         return text
@@ -92,25 +114,34 @@ class HunsrikRAG:
             return 0.0
         return dot_product / (mag1 * mag2)
     
-    def process_pdfs(self):
-        """Process all PDFs in the PDF directory"""
-        pdf_dir = Path(PDF_DIR)
-        if not pdf_dir.exists():
-            print(f"❌ Directory '{PDF_DIR}' not found!")
+    def process_files(self):
+        """Process all PDF and TXT files in the resources directory"""
+        resources_dir = Path(RESOURCES_DIR)
+        if not resources_dir.exists():
+            print(f"❌ Directory '{RESOURCES_DIR}' not found!")
             return
         
-        pdf_files = list(pdf_dir.glob("*.pdf"))
-        if not pdf_files:
-            print(f"❌ No PDF files found in '{PDF_DIR}'")
+        pdf_files = list(resources_dir.glob("*.pdf"))
+        txt_files = list(resources_dir.glob("*.txt"))
+        all_files = pdf_files + txt_files
+        
+        if not all_files:
+            print(f"❌ No PDF or TXT files found in '{RESOURCES_DIR}'")
             return
         
-        print(f"\n🚀 Processing {len(pdf_files)} PDF file(s)...\n")
+        print(f"\n🚀 Processing {len(pdf_files)} PDF(s) and {len(txt_files)} TXT file(s)...\n")
         
         all_chunks = []
-        for pdf_file in pdf_files:
-            text = self.extract_text_from_pdf(str(pdf_file))
+        for file_path in all_files:
+            if file_path.suffix.lower() == '.pdf':
+                text = self.extract_text_from_pdf(str(file_path))
+            elif file_path.suffix.lower() == '.txt':
+                text = self.extract_text_from_txt(str(file_path))
+            else:
+                continue
+            
             if text:
-                chunks = self.chunk_text(text, pdf_file.name)
+                chunks = self.chunk_text(text, file_path.name)
                 all_chunks.extend(chunks)
                 print(f"   → Created {len(chunks)} chunks\n")
         
@@ -152,7 +183,7 @@ class HunsrikRAG:
     def retrieve(self, query: str, top_k: int = TOP_K) -> List[Dict]:
         """Retrieve most relevant chunks for a query"""
         if not self.vector_store:
-            print("⚠️  Vector store is empty. Run process_pdfs() first.")
+            print("⚠️  Vector store is empty. Run process_files() first.")
             return []
         
         query_embedding = self.get_embedding(query)
@@ -180,7 +211,7 @@ class HunsrikRAG:
         relevant_chunks = self.retrieve(question)
         
         if not relevant_chunks:
-            return "No relevant information found. Please process PDFs first."
+            return "No relevant information found. Please process files first."
         
         if verbose:
             print(f"   ✓ Found {len(relevant_chunks)} relevant chunks\n")
@@ -229,7 +260,7 @@ Seja breve e direto."""
         print("\nCommands:")
         print("  - Type your question to get an answer")
         print("  - 'quit' or 'exit' to stop")
-        print("  - 'reprocess' to reload PDFs")
+        print("  - 'reprocess' to reload all files (PDFs and TXTs)")
         print("="*60 + "\n")
         
         while True:
@@ -244,7 +275,7 @@ Seja breve e direto."""
                     break
                 
                 if user_input.lower() == 'reprocess':
-                    self.process_pdfs()
+                    self.process_files()
                     continue
                 
                 answer = self.query(user_input)
@@ -268,12 +299,12 @@ def main():
     
     # Check if vector store exists
     if not rag.vector_store:
-        print("\n📋 First time setup: Processing PDFs...")
-        response = input("Process PDFs now? (y/n): ").strip().lower()
+        print("\n📋 First time setup: Processing files...")
+        response = input("Process files now? (y/n): ").strip().lower()
         if response == 'y':
-            rag.process_pdfs()
+            rag.process_files()
         else:
-            print("⚠️  Skipping PDF processing. Run with 'reprocess' command later.")
+            print("⚠️  Skipping file processing. Run with 'reprocess' command later.")
     
     # Start interactive mode
     rag.interactive_mode()

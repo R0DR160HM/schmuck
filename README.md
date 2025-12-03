@@ -38,7 +38,7 @@ python schmuck.py
 ```
 
 On first run, it will:
-1. Extract text from all PDFs in the `pdfs/` folder
+1. Extract text from all files in the `resources/` folder
 2. Create embeddings (this may take a few minutes)
 3. Save the vector store to `hunsrik_vectors.json`
 4. Start interactive mode
@@ -62,7 +62,7 @@ You: Translate "Ich liebe dich" to Portuguese
 ## 📝 Commands
 
 - Type any question to get an answer
-- `reprocess` - Reload and reprocess all PDFs
+- `reprocess` - Reload and reprocess all resources
 - `quit` or `exit` - Exit the program
 
 ## 🔧 Configuration
@@ -82,7 +82,7 @@ TOP_K = 5                         # Number of context chunks to retrieve
 hunsrik-gemma/
 ├── schmuck.py              # Main RAG system
 ├── requirements.txt        # Python dependencies
-├── pdfs/                   # Your Hunsrik PDF materials
+├── resources/              # Your Hunsrik materials
 │   ├── Your resources
 └── hunsrik_vectors.json    # Generated vector store (created on first run)
 ```
