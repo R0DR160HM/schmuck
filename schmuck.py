@@ -15,12 +15,18 @@ from datetime import datetime
 # ---------- CONFIG ----------
 EMBED_MODEL = "embeddinggemma"
 GEN_MODEL = "gemma3n:e2b"
-RESOURCES_DIR = "resources"  # Directory containing PDF and TXT files
+RESOURCES_DIR = "resources"  # Base directory
 VECTOR_STORE_FILE = "hunsrik_vectors.json"
-CHUNK_SIZE = 500  # characters per chunk
-CHUNK_OVERLAP = 50  # overlap between chunks
-TOP_K = 5  # number of relevant chunks to retrieve
+CHUNK_SIZE = 300  # characters per chunk (smaller for dictionary entries)
+CHUNK_OVERLAP = 100  # overlap between chunks (more overlap)
+TOP_K_DICT = 15  # chunks from dictionary/grammar
+TOP_K_SAMPLES = 5  # chunks from Hunsrik samples
 # ----------------------------
+
+# Resource types
+RESOURCE_DICT = "dictionary"
+RESOURCE_GRAMMAR = "grammar"
+RESOURCE_SAMPLE = "sample"
 
 
 class HunsrikRAG:
@@ -66,7 +72,7 @@ class HunsrikRAG:
             print(f"   ✗ Error: {e}")
         return text
     
-    def chunk_text(self, text: str, source: str) -> List[Dict]:
+    def chunk_text(self, text: str, source: str, resource_type: str = RESOURCE_DICT) -> List[Dict]:
         """Split text into overlapping chunks"""
         chunks = []
         text = text.strip()
@@ -89,6 +95,7 @@ class HunsrikRAG:
                 chunks.append({
                     'text': chunk.strip(),
                     'source': source,
+                    'resource_type': resource_type,
                     'start_pos': start
                 })
             
@@ -115,35 +122,62 @@ class HunsrikRAG:
         return dot_product / (mag1 * mag2)
     
     def process_files(self):
-        """Process all PDF and TXT files in the resources directory"""
+        """Process all PDF and TXT files from multiple resource folders"""
         resources_dir = Path(RESOURCES_DIR)
         if not resources_dir.exists():
             print(f"❌ Directory '{RESOURCES_DIR}' not found!")
             return
         
-        pdf_files = list(resources_dir.glob("*.pdf"))
-        txt_files = list(resources_dir.glob("*.txt"))
-        all_files = pdf_files + txt_files
-        
-        if not all_files:
-            print(f"❌ No PDF or TXT files found in '{RESOURCES_DIR}'")
-            return
-        
-        print(f"\n🚀 Processing {len(pdf_files)} PDF(s) and {len(txt_files)} TXT file(s)...\n")
+        # Define folder mappings
+        folder_types = {
+            'dicts': RESOURCE_DICT,
+            'grammar': RESOURCE_GRAMMAR,
+            'samples': RESOURCE_SAMPLE,
+        }
         
         all_chunks = []
-        for file_path in all_files:
-            if file_path.suffix.lower() == '.pdf':
-                text = self.extract_text_from_pdf(str(file_path))
-            elif file_path.suffix.lower() == '.txt':
-                text = self.extract_text_from_txt(str(file_path))
-            else:
+        total_files = 0
+        
+        print(f"\n🚀 Processing resources from multiple folders...\n")
+        
+        # Process each folder type
+        for folder_name, resource_type in folder_types.items():
+            folder_path = resources_dir / folder_name
+            
+            if not folder_path.exists():
+                print(f"⚠️  Folder '{folder_name}' not found, skipping...")
                 continue
             
-            if text:
-                chunks = self.chunk_text(text, file_path.name)
-                all_chunks.extend(chunks)
-                print(f"   → Created {len(chunks)} chunks\n")
+            pdf_files = list(folder_path.glob("*.pdf"))
+            txt_files = list(folder_path.glob("*.txt"))
+            folder_files = pdf_files + txt_files
+            
+            if not folder_files:
+                print(f"📁 {folder_name}/: No files found")
+                continue
+            
+            print(f"📁 {folder_name}/: Processing {len(folder_files)} file(s) ({resource_type})")
+            folder_chunks = 0
+            
+            for file_path in folder_files:
+                if file_path.suffix.lower() == '.pdf':
+                    text = self.extract_text_from_pdf(str(file_path))
+                elif file_path.suffix.lower() == '.txt':
+                    text = self.extract_text_from_txt(str(file_path))
+                else:
+                    continue
+                
+                if text:
+                    chunks = self.chunk_text(text, file_path.name, resource_type)
+                    all_chunks.extend(chunks)
+                    folder_chunks += len(chunks)
+                    total_files += 1
+            
+            print(f"   → Created {folder_chunks} chunks from {folder_name}\n")
+        
+        if not all_chunks:
+            print("❌ No files processed!")
+            return
         
         print(f"📊 Total chunks: {len(all_chunks)}")
         print(f"🔮 Generating embeddings with {EMBED_MODEL}...\n")
@@ -155,9 +189,10 @@ class HunsrikRAG:
                 self.vector_store.append({
                     'text': chunk['text'],
                     'source': chunk['source'],
+                    'resource_type': chunk['resource_type'],
                     'embedding': embedding
                 })
-                if (i + 1) % 10 == 0:
+                if (i + 1) % 20 == 0:
                     print(f"   Progress: {i + 1}/{len(all_chunks)}")
         
         print(f"\n✅ Created {len(self.vector_store)} embeddings")
@@ -180,8 +215,8 @@ class HunsrikRAG:
         else:
             print("ℹ️  No existing vector store found")
     
-    def retrieve(self, query: str, top_k: int = TOP_K) -> List[Dict]:
-        """Retrieve most relevant chunks for a query"""
+    def retrieve(self, query: str, top_k: int = 15, resource_types: List[str] = None) -> List[Dict]:
+        """Retrieve most relevant chunks for a query, optionally filtered by resource type"""
         if not self.vector_store:
             print("⚠️  Vector store is empty. Run process_files() first.")
             return []
@@ -190,67 +225,163 @@ class HunsrikRAG:
         if not query_embedding:
             return []
         
+        # Filter by resource type if specified
+        items_to_search = self.vector_store
+        if resource_types:
+            items_to_search = [item for item in self.vector_store 
+                             if item.get('resource_type') in resource_types]
+        
         # Calculate similarities
         similarities = []
-        for item in self.vector_store:
+        for item in items_to_search:
             sim = self.cosine_similarity(query_embedding, item['embedding'])
             similarities.append((sim, item))
         
         # Sort by similarity and get top_k
         similarities.sort(reverse=True, key=lambda x: x[0])
-        return [{'text': item['text'], 'source': item['source'], 'similarity': sim} 
+        return [{'text': item['text'], 'source': item['source'], 
+                'resource_type': item.get('resource_type', 'unknown'), 'similarity': sim} 
                 for sim, item in similarities[:top_k]]
     
+    def hybrid_retrieve(self, text: str) -> Dict[str, List[Dict]]:
+        """Intelligent hybrid retrieval: dict/grammar first, then samples for context"""
+        # Extract individual words for dictionary lookup
+        words = text.lower().replace('?', '').replace('!', '').replace('.', '').replace(',', '').split()
+        
+        # Create query variations
+        queries = [text, f"tradução português hunsrik: {text}"]
+        for word in words:
+            if len(word) > 2:
+                queries.append(word)
+        
+        # STEP 1: Search dictionary and grammar
+        dict_results = {}
+        for query in queries:
+            results = self.retrieve(query, top_k=TOP_K_DICT, 
+                                  resource_types=[RESOURCE_DICT, RESOURCE_GRAMMAR])
+            for result in results:
+                text_key = result['text']
+                if text_key in dict_results:
+                    dict_results[text_key]['similarity'] += result['similarity'] * 0.3
+                else:
+                    dict_results[text_key] = result
+        
+        dict_sorted = sorted(dict_results.values(), key=lambda x: x['similarity'], reverse=True)[:TOP_K_DICT]
+        
+        # STEP 2: Extract potential Hunsrik words from dictionary results
+        # Look for patterns like "word (HRX)" or lines with Hunsrik text
+        hunsrik_terms = set()
+        for result in dict_sorted[:5]:  # Use top 5 dictionary results
+            # Simple extraction: get words that look like Hunsrik
+            for word in result['text'].split():
+                word_clean = word.strip('.,;:()[]"').lower()
+                # Hunsrik often has: double vowels (aa, ee, oo), specific patterns
+                if len(word_clean) > 3 and any(c in word_clean for c in ['aa', 'ee', 'oo', 'ä', 'ö', 'ü']):
+                    hunsrik_terms.add(word_clean)
+        
+        # STEP 3: Search samples using Hunsrik terms found in dictionary
+        sample_results = {}
+        if hunsrik_terms:
+            for term in list(hunsrik_terms)[:5]:  # Limit to avoid too many queries
+                results = self.retrieve(term, top_k=TOP_K_SAMPLES, 
+                                      resource_types=[RESOURCE_SAMPLE])
+                for result in results:
+                    text_key = result['text']
+                    if text_key not in sample_results:
+                        sample_results[text_key] = result
+        
+        sample_sorted = sorted(sample_results.values(), key=lambda x: x['similarity'], reverse=True)[:TOP_K_SAMPLES]
+        
+        return {
+            'dictionary': dict_sorted,
+            'samples': sample_sorted
+        }
+    
     def query(self, question: str, verbose: bool = True) -> str:
-        """Query the RAG system"""
+        """Query with hybrid retrieval: dictionary + samples for context"""
         if verbose:
-            print(f"\n💬 Question: {question}\n")
-            print("🔍 Retrieving relevant context...")
+            print(f"\n💬 Texto para traduzir: {question}\n")
+            print("🔍 Fase 1: Buscando no dicionário e gramática...")
         
-        # Retrieve relevant chunks
-        relevant_chunks = self.retrieve(question)
+        # Use hybrid retrieval
+        results = self.hybrid_retrieve(question)
+        dict_chunks = results['dictionary']
+        sample_chunks = results['samples']
         
-        if not relevant_chunks:
-            return "No relevant information found. Please process files first."
+        if not dict_chunks:
+            return "Nenhuma informação relevante encontrada. Execute 'reprocess' primeiro."
         
         if verbose:
-            print(f"   ✓ Found {len(relevant_chunks)} relevant chunks\n")
-            for i, chunk in enumerate(relevant_chunks[:3], 1):
-                print(f"   [{i}] Similarity: {chunk['similarity']:.3f} | Source: {chunk['source']}")
+            print(f"   ✓ {len(dict_chunks)} entradas do dicionário/gramática")
+            for i, chunk in enumerate(dict_chunks[:3], 1):
+                preview = chunk['text'][:60].replace('\n', ' ')
+                print(f"   [{i}] Score: {chunk['similarity']:.3f} | {preview}...")
+            
+            if sample_chunks:
+                print(f"\n🔍 Fase 2: Buscando exemplos em textos Hunsrik...")
+                print(f"   ✓ {len(sample_chunks)} exemplos de uso encontrados")
+                for i, chunk in enumerate(sample_chunks[:2], 1):
+                    preview = chunk['text'][:60].replace('\n', ' ')
+                    print(f"   [{i}] {preview}...")
         
-        # Build context
-        context = "\n\n---\n\n".join([
-            f"[Source: {chunk['source']}]\n{chunk['text']}" 
-            for chunk in relevant_chunks
-        ])
+        # Build contexts separately
+        dict_context = "\n\n".join([chunk['text'] for chunk in dict_chunks])
+        
+        sample_context = ""
+        if sample_chunks:
+            sample_context = "\n\n=== EXEMPLOS DE USO EM CONTEXTO (textos Hunsrik) ===\n"
+            sample_context += "\n".join([chunk['text'][:200] for chunk in sample_chunks[:3]])
+            sample_context += "\n=== FIM DOS EXEMPLOS ==="
         
         # Build prompt
-        prompt = f"""Você é um especialista na língua hunsriqueana (Hunsrickisch). Use o contexto a seguir (materiais de aprendizado de hunsriqueano) para responder à pergunta.
+        prompt = f"""Você é um tradutor especializado em Hunsrik (Hunsrückisch). Use APENAS as informações do dicionário fornecido abaixo. NÃO invente palavras.
 
-Contexto dos materiais de hunsriqueano:
-{context}
+=== DICIONÁRIO E GRAMÁTICA HUNSRIK ===
+{dict_context}
+=== FIM DO DICIONÁRIO ===
 
-Pergunta: {question}
+{sample_context}
 
-Responda com base no contexto acima. Responda sempre em português e, em seguida, traduza para hunsriqueano, seguindo as regras gramáticais e exemplos obtidos no contexto.
-Seja breve e direto."""
+=== EXEMPLOS DE TRADUÇÕES ===
+Português: "Meu nome é Maria"
+Hunsrik: "Mein Naame is Maria"
+
+Português: "Eu tenho um cachorro"
+Hunsrik: "Ich hann en Hund"
+
+Português: "Bom dia"
+Hunsrik: "Gude Dag"
+=== FIM DOS EXEMPLOS ===
+
+INSTRUÇÕES:
+1. Procure cada palavra no dicionário acima
+2. Use a ortografia EXATA do dicionário
+3. Se não encontrar uma palavra, mantenha-a em português entre parênteses
+4. Responda APENAS com a tradução, sem explicações
+
+Português: "{question}"
+Hunsrik:"""
         
         if verbose:
-            print(f"\n🤖 Generating answer with {GEN_MODEL}...\n")
+            print(f"\n🤖 Gerando tradução com {GEN_MODEL}...\n")
+            print(f"\n🤖 Gerando tradução com {GEN_MODEL}...\n")
         
-        # Generate response
+        # Generate response with lower temperature for more accurate translations
+        # Generate response with lower temperature for more accurate translations
         try:
             response = ollama.generate(
                 model=GEN_MODEL,
                 prompt=prompt,
                 options={
-                    'temperature': 0.7,
-                    'top_p': 0.9,
+                    'temperature': 0.15,
+                    'top_p': 0.85,
+                    'top_k': 40,
+                    'repeat_penalty': 1.2,
                 }
             )
-            return response['response']
+            return response['response'].strip()
         except Exception as e:
-            return f"Error generating response: {e}"
+            return f"Erro ao gerar resposta: {e}"
     
     def interactive_mode(self):
         """Start interactive Q&A session"""

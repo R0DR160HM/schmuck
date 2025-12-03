@@ -1,0 +1,113 @@
+um -> een
+dois -> zwaai
+três -> drei
+quatro -> fier
+cinco -> finnef
+seis -> sechs
+sete -> sieve
+oito -> acht
+nove -> nein
+dez -> zehn
+
+Bem-vindo(a) -> Willlkomm
+Oi/Olá -> Oi
+Tchau -> Tschau
+Bom dia -> Gummeuend
+Boa tarde -> Gundach
+Boa noite (cumprimento) -> Gunovend
+Boa noite (despedida) -> Gunacht
+Tudo certo/Como vai? -> Alles gud?
+Eu estou bem, e você? -> Ich sin gud, un du?
+Qual é o seu nome -> Was is dein Naame?
+Meu nome ... -> Mein Naame is ...
+De onde você é? -> Fun wo bist du?
+Eu sou de ... -> Ich sin fun ...
+Você fala hunsriqueano -> Sprechst-du Hunsrickisch?
+Sim / Não -> Jo / Nee
+Obrigado(a) -> Danke scheen
+De nada -> Bitte scheen
+Eu te amo -> Ich lieve dich
+Eu entendo -> Ich ferstehe
+Eu não entendo -> Ich ferstehe es net
+
+Terra -> Äerd
+Velho -> Alt
+Olho -> Au
+Árvore -> Baam
+Montanha -> Berrich
+Folha -> Blaat
+Azul -> Blau
+Flor -> Blumm
+Irmão -> Bruder
+Dia -> Daagh
+Aquele -> Dart das / Dart die / Dart de
+Lá -> Dart/Dort
+Este -> Do das / Do die / Do de
+Aqui -> Do / Hier
+Ele -> Er
+Isso -> Es
+Você (singular) -> Du
+Você (plural) -> Deer
+Pai -> Fatter
+Fogo -> Feier
+Peixe -> Fisch
+Pássaro/Ave -> Foghel/Fohl
+Amigo(a) -> Freind
+Fruta -> Frucht
+Pé -> Fus
+Cavalo -> Gaul
+Amarelo -> Gelleb/Gel
+Cara/Rosto -> Gesicht
+Grama -> Graas/Gramm
+Verde -> Grien
+Avô -> Grosfatter
+Avó -> Grosmutter
+Mão -> Hand
+Céu -> Himmel
+Galinha -> Hinkel
+Cabelo -> Hoer
+Cachorro/Cão -> Hund
+Eu -> Ich
+Ano -> Joher
+Gato -> Katz
+Cabeça -> Kopp
+Vaca -> Kuh
+Professor(a) -> Leerer/Leerin
+Povo -> Leit
+Aluno(a)/Estudante -> Lerner/Student
+Esquerda -> Links
+Ar -> Luft
+Masculino -> Masch/Mennlich
+Feminino -> Weibche/Weiblich
+Nós -> Meer
+Mar -> Meer
+Vermelho -> Rod
+Ovelha -> Schof
+Preto/Negro -> Schwarz
+Porco -> Schwein/Sau
+Irmã -> Schwesder
+Eles/Elas -> Sie
+Ela -> Sie
+Filho -> Sohn
+Estrelas -> Stern
+Sol -> Sunn
+E -> Un
+Floresta -> Wald
+Água -> Wasser
+Porque -> Welche/Wal/Wel
+Branco -> Weis
+Se -> Wenn/Wann
+Dente -> Zaan
+Centro -> Zentrum/Centro
+
+Pais nosso, que estais no céu -> Fatter unser, wo im Himmel bist
+Santificado seja o Vosso nome -> Geheillichd sei Dein Naame
+Venha a nós o Vosso reino -> Komm Dein Reich
+Seja feita a Vossa vontade -> Werd gemachd Dein Will
+Assim na Terra como no céu -> Wie im Himmel, so aach uff de Äerd
+O pão nosso de cada dia nos dai hoje -> Unser deeghlich Brod gebb uns heit
+E perduai-nos as nossas ofensas -> Un fergebb uns unser Schuld
+Assim como nós perdoamos aqueles que nos tem ofendido -> Wie aach meer unser Schullicher fergewe
+E não nos deixei cair em tentação -> Un feer uns net in Fersunghung
+Mas livrai-nos do mal -> Sonder erlees uns fum Ivel
+Amém -> Amem
