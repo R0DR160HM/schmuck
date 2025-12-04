@@ -18,9 +18,10 @@ GEN_MODEL = "gemma3n:e2b"
 RESOURCES_DIR = "resources"  # Base directory
 VECTOR_STORE_FILE = "hunsrik_vectors.json"
 CHUNK_SIZE = 300  # characters per chunk (smaller for dictionary entries)
-CHUNK_OVERLAP = 100  # overlap between chunks (more overlap)
-TOP_K_DICT = 15  # chunks from dictionary/grammar
-TOP_K_SAMPLES = 5  # chunks from Hunsrik samples
+CHUNK_OVERLAP = 120  # overlap between chunks (more overlap)
+TOP_K_DICT = 25  # chunks from dictionary/grammar (increased for long sentences)
+TOP_K_SAMPLES = 8  # chunks from Hunsrik samples
+LOG_FILE = "translation_log.jsonl"  # Log file for all translations
 # ----------------------------
 
 # Resource types
@@ -33,6 +34,51 @@ class HunsrikRAG:
     def __init__(self):
         self.vector_store = []
         self.load_vector_store()
+    
+    def log_query(self, input_text: str, prompt: str, response: str, 
+                  dict_chunks: List[Dict], sample_chunks: List[Dict], hunsrik_terms: List[str]):
+        """Log query details to file"""
+        log_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "input": input_text,
+            "response": response,
+            "prompt": prompt,
+            "context": {
+                "dictionary_entries": [
+                    {
+                        "text": chunk['text'],
+                        "source": chunk['source'],
+                        "similarity": chunk['similarity']
+                    } for chunk in dict_chunks
+                ],
+                "grammar_entries": [
+                    {
+                        "text": chunk['text'],
+                        "source": chunk['source'],
+                        "similarity": chunk['similarity']
+                    } for chunk in dict_chunks if chunk.get('resource_type') == RESOURCE_GRAMMAR
+                ],
+                "sample_texts": [
+                    {
+                        "text": chunk['text'],
+                        "source": chunk['source'],
+                        "similarity": chunk['similarity']
+                    } for chunk in sample_chunks
+                ],
+                "hunsrik_terms_extracted": hunsrik_terms
+            },
+            "stats": {
+                "num_dict_entries": len(dict_chunks),
+                "num_samples": len(sample_chunks),
+                "num_hunsrik_terms": len(hunsrik_terms)
+            }
+        }
+        
+        try:
+            with open(LOG_FILE, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(log_entry, ensure_ascii=False) + '\n')
+        except Exception as e:
+            print(f"⚠️  Warning: Could not write to log file: {e}")
     
     def extract_text_from_pdf(self, pdf_path: str) -> str:
         """Extract text from a PDF file"""
@@ -72,10 +118,42 @@ class HunsrikRAG:
             print(f"   ✗ Error: {e}")
         return text
     
+    def clean_dictionary_metadata(self, text: str) -> str:
+        """Remove dictionary-specific metadata that confuses the model"""
+        import re
+        
+        # Dictionary metadata patterns to remove
+        metadata_patterns = [
+            r'/[^/]+/',  # Phonetic transcriptions like /ˈɔːpaˌhoːa/
+            r'\b(sf|sm|sn|adj|adv|v|vt|vi|prep|conj|interj|pron|num)\b',  # Grammatical categories
+            r'\b(nie|gmc|gmf|gml|gmh|gml|gmo|gmw|grc|hno|inc)\b',  # Ethymologies
+            r'\b(pl|sing|masc|fem|neut)\b',  # Number and gender markers
+            r'\b(Anat|Geog|Bot|Pop|Zool|Med|Culin|Arquit|Meteor|Agric|Relig|Econ|Pol|Hist)\b',  # Domain markers
+            r'\bSin\b',  # Synonym marker
+            r'\b§\b',  # Example marker
+            r'\bgmf\b',  # GMF marker
+            r'\(pl\s+\w+\)',  # Plural forms in parentheses like (pl Aaperhore)
+        ]
+        
+        cleaned = text
+        for pattern in metadata_patterns:
+            cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
+        
+        # Remove multiple spaces and clean up
+        cleaned = re.sub(r'\s+', ' ', cleaned)
+        cleaned = cleaned.strip()
+        
+        return cleaned
+    
     def chunk_text(self, text: str, source: str, resource_type: str = RESOURCE_DICT) -> List[Dict]:
         """Split text into overlapping chunks"""
         chunks = []
         text = text.strip()
+        
+        # Clean dictionary metadata only for dictionary resources
+        if resource_type == RESOURCE_DICT:
+            text = self.clean_dictionary_metadata(text)
+        
         start = 0
         
         while start < len(text):
@@ -268,33 +346,62 @@ class HunsrikRAG:
         
         dict_sorted = sorted(dict_results.values(), key=lambda x: x['similarity'], reverse=True)[:TOP_K_DICT]
         
-        # STEP 2: Extract potential Hunsrik words from dictionary results
-        # Look for patterns like "word (HRX)" or lines with Hunsrik text
+        # STEP 2: Extract Hunsrik words from dictionary results (use ALL results, not just top 5)
         hunsrik_terms = set()
-        for result in dict_sorted[:5]:  # Use top 5 dictionary results
-            # Simple extraction: get words that look like Hunsrik
+        for result in dict_sorted:  # Use ALL dictionary results
+            text_lower = result['text'].lower()
+            
+            # Method 1: Look for explicit markers like (HRX), [Hunsrik], etc.
+            import re
+            # Pattern: word after "=" or before (HRX) or Hunsrik markers
+            hrx_patterns = [
+                r'=\s*([\wäÄËë]+)',  # word = Hunsrik
+                r'\(hrx\)\s*([\wäÄËë]+)',  # (HRX) Hunsrik
+                r'([\wäÄËë]+)\s*\(hrx\)',  # Hunsrik (HRX)
+                r'hunsrik[:\s]+([\wäÄËë]+)',  # Hunsrik: word
+            ]
+            
+            for pattern in hrx_patterns:
+                matches = re.findall(pattern, text_lower, re.IGNORECASE)
+                for match in matches:
+                    if len(match) > 2:
+                        hunsrik_terms.add(match.strip())
+            
+            # Method 2: Extract words with Hunsrik characteristics
             for word in result['text'].split():
-                word_clean = word.strip('.,;:()[]"').lower()
-                # Hunsrik often has: double vowels (aa, ee, oo), specific patterns
-                if len(word_clean) > 3 and any(c in word_clean for c in ['aa', 'ee', 'oo', 'ä', 'ö', 'ü']):
-                    hunsrik_terms.add(word_clean)
+                word_clean = word.strip('.,;:()[]"!?-–—').lower()
+                # Hunsrik indicators: double vowels, umlauts, specific patterns
+                if len(word_clean) > 2:
+                    has_double_vowel = any(dv in word_clean for dv in ['aa', 'ee', 'oo', 'uu', 'ii'])
+                    has_umlaut = any(u in word_clean for u in ['ä', 'ö', 'ü'])
+                    has_german_pattern = word_clean.startswith(('ge', 'ver', 'be', 'ich', 'mein', 'de'))
+                    
+                    if has_double_vowel or has_umlaut or has_german_pattern:
+                        hunsrik_terms.add(word_clean)
         
-        # STEP 3: Search samples using Hunsrik terms found in dictionary
+        # STEP 3: Search samples using ALL extracted Hunsrik terms
         sample_results = {}
         if hunsrik_terms:
-            for term in list(hunsrik_terms)[:5]:  # Limit to avoid too many queries
+            # Use all terms but prioritize longer, more specific ones
+            sorted_terms = sorted(hunsrik_terms, key=len, reverse=True)[:15]  # Top 15 terms
+            
+            for term in sorted_terms:
                 results = self.retrieve(term, top_k=TOP_K_SAMPLES, 
                                       resource_types=[RESOURCE_SAMPLE])
                 for result in results:
                     text_key = result['text']
-                    if text_key not in sample_results:
+                    if text_key in sample_results:
+                        # Boost score if same sample found with multiple terms
+                        sample_results[text_key]['similarity'] += result['similarity'] * 0.2
+                    else:
                         sample_results[text_key] = result
         
         sample_sorted = sorted(sample_results.values(), key=lambda x: x['similarity'], reverse=True)[:TOP_K_SAMPLES]
         
         return {
             'dictionary': dict_sorted,
-            'samples': sample_sorted
+            'samples': sample_sorted,
+            'hunsrik_terms': sorted_terms if hunsrik_terms else []
         }
     
     def query(self, question: str, verbose: bool = True) -> str:
@@ -307,20 +414,26 @@ class HunsrikRAG:
         results = self.hybrid_retrieve(question)
         dict_chunks = results['dictionary']
         sample_chunks = results['samples']
+        hunsrik_terms = results.get('hunsrik_terms', [])
         
         if not dict_chunks:
             return "Nenhuma informação relevante encontrada. Execute 'reprocess' primeiro."
         
         if verbose:
             print(f"   ✓ {len(dict_chunks)} entradas do dicionário/gramática")
-            for i, chunk in enumerate(dict_chunks[:3], 1):
+            for i, chunk in enumerate(dict_chunks[:10], 1):
                 preview = chunk['text'][:60].replace('\n', ' ')
                 print(f"   [{i}] Score: {chunk['similarity']:.3f} | {preview}...")
+            
+            if hunsrik_terms:
+                print(f"\n   🎯 Termos Hunsrik extraídos: {', '.join(hunsrik_terms[:10])}")
+                if len(hunsrik_terms) > 10:
+                    print(f"      ... e mais {len(hunsrik_terms) - 10} termos")
             
             if sample_chunks:
                 print(f"\n🔍 Fase 2: Buscando exemplos em textos Hunsrik...")
                 print(f"   ✓ {len(sample_chunks)} exemplos de uso encontrados")
-                for i, chunk in enumerate(sample_chunks[:2], 1):
+                for i, chunk in enumerate(sample_chunks[:10], 1):
                     preview = chunk['text'][:60].replace('\n', ' ')
                     print(f"   [{i}] {preview}...")
         
@@ -329,14 +442,14 @@ class HunsrikRAG:
         
         sample_context = ""
         if sample_chunks:
-            sample_context = "\n\n=== EXEMPLOS DE USO EM CONTEXTO (textos Hunsrik) ===\n"
+            sample_context = "\n\n=== EXEMPLOS DE USO EM CONTEXTO (textos Hunsrickisch) ===\n"
             sample_context += "\n".join([chunk['text'][:200] for chunk in sample_chunks[:3]])
             sample_context += "\n=== FIM DOS EXEMPLOS ==="
         
         # Build prompt
-        prompt = f"""Você é um tradutor especializado em Hunsrik (Hunsrückisch). Use APENAS as informações do dicionário fornecido abaixo. NÃO invente palavras.
+        prompt = f"""Você é um tradutor especializado em hunrisqueano (Hunsrickisch). Use APENAS as informações do dicionário fornecido abaixo. NÃO invente palavras.
 
-=== DICIONÁRIO E GRAMÁTICA HUNSRIK ===
+=== DICIONÁRIO E GRAMÁTICA ===
 {dict_context}
 === FIM DO DICIONÁRIO ===
 
@@ -344,13 +457,19 @@ class HunsrikRAG:
 
 === EXEMPLOS DE TRADUÇÕES ===
 Português: "Meu nome é Maria"
-Hunsrik: "Mein Naame is Maria"
+Hunsrickisch: "Mein Naame is Maria"
 
 Português: "Eu tenho um cachorro"
-Hunsrik: "Ich hann en Hund"
+Hunsrickisch: "Ich hon en Hund"
 
 Português: "Bom dia"
-Hunsrik: "Gude Dag"
+Hunsrickisch: "Gummeuend"
+
+Português: "Tudo bem?"
+Hunsrickisch: "Alles gud?"
+
+Português: "Onde está o Pedro?"
+Hunsrickisch: "Wo is de Pedro?"
 === FIM DOS EXEMPLOS ===
 
 INSTRUÇÕES:
@@ -360,10 +479,9 @@ INSTRUÇÕES:
 4. Responda APENAS com a tradução, sem explicações
 
 Português: "{question}"
-Hunsrik:"""
+Hunsrickisch:"""
         
         if verbose:
-            print(f"\n🤖 Gerando tradução com {GEN_MODEL}...\n")
             print(f"\n🤖 Gerando tradução com {GEN_MODEL}...\n")
         
         # Generate response with lower temperature for more accurate translations
@@ -379,7 +497,19 @@ Hunsrik:"""
                     'repeat_penalty': 1.2,
                 }
             )
-            return response['response'].strip()
+            result = response['response'].strip()
+            
+            # Log the query details
+            self.log_query(
+                input_text=question,
+                prompt=prompt,
+                response=result,
+                dict_chunks=dict_chunks,
+                sample_chunks=sample_chunks,
+                hunsrik_terms=hunsrik_terms
+            )
+            
+            return result
         except Exception as e:
             return f"Erro ao gerar resposta: {e}"
     
