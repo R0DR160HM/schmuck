@@ -128,7 +128,7 @@ class HunsrikRAG:
             r'\b(sf|sm|sn|adj|adv|v|vt|vi|prep|conj|interj|pron|num)\b',  # Grammatical categories
             r'\b(nie|gmc|gmf|gml|gmh|gml|gmo|gmw|grc|hno|inc)\b',  # Ethymologies
             r'\b(pl|sing|masc|fem|neut)\b',  # Number and gender markers
-            r'\b(Anat|Geog|Bot|Pop|Zool|Med|Culin|Arquit|Meteor|Agric|Relig|Econ|Pol|Hist)\b',  # Domain markers
+            r'\b(Anat|Geog|Bot|Pop|Zool|Med|Culin|Arquit|Meteor|Agric|Relig|Econ|Pol|Hist|NP)\b',  # Domain markers
             r'\bSin\b',  # Synonym marker
             r'\b§\b',  # Example marker
             r'\bgmf\b',  # GMF marker
@@ -145,15 +145,99 @@ class HunsrikRAG:
         
         return cleaned
     
+    def chunk_dictionary_entries(self, text: str, source: str) -> List[Dict]:
+        """Split dictionary text into individual entries intelligently"""
+        import re
+        chunks = []
+        
+        # Pattern 1: Lines starting with capital letter followed by phonetic /.../ or word definition
+        # This catches entries like: "Anillblau /aˈnilˌplaw/ sn anil..."
+        entry_pattern = r'^([A-ZÄËÏ][a-zäëï]*(?:[a-zäëï]+)*)\s+(?:/[^/]+/|→)'
+        
+        lines = text.split('\n')
+        current_entry = []
+        entry_word = None
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Check if this line starts a new entry
+            match = re.match(entry_pattern, line, re.MULTILINE)
+            
+            if match:
+                # Save previous entry if exists
+                if current_entry:
+                    entry_text = '\n'.join(current_entry)
+                    if len(entry_text) > 10:  # Only save substantial entries
+                        chunks.append({
+                            'text': entry_text,
+                            'source': source,
+                            'resource_type': RESOURCE_DICT,
+                            'entry_word': entry_word
+                        })
+                
+                # Start new entry
+                entry_word = match.group(1)
+                current_entry = [line]
+            elif current_entry:
+                # Continue current entry
+                # Stop if line looks like it might be a new entry without phonetic
+                # (starts with capital and has Portuguese/Hunsrik pattern)
+                if re.match(r'^[A-ZÄËÏ][a-zäëï]+\s+(→|sf|sm|sn|adj|adv)', line):
+                    # Save previous entry
+                    entry_text = '\n'.join(current_entry)
+                    if len(entry_text) > 10:
+                        chunks.append({
+                            'text': entry_text,
+                            'source': source,
+                            'resource_type': RESOURCE_DICT,
+                            'entry_word': entry_word
+                        })
+                    # Start new entry
+                    entry_word = line.split()[0]
+                    current_entry = [line]
+                else:
+                    current_entry.append(line)
+            else:
+                # Line doesn't match entry pattern and no current entry
+                # Might be intro text, treat as separate chunk
+                if len(line) > 30:  # Only substantial text
+                    chunks.append({
+                        'text': line,
+                        'source': source,
+                        'resource_type': RESOURCE_DICT,
+                        'entry_word': None
+                    })
+        
+        # Don't forget last entry
+        if current_entry:
+            entry_text = '\n'.join(current_entry)
+            if len(entry_text) > 10:
+                chunks.append({
+                    'text': entry_text,
+                    'source': source,
+                    'resource_type': RESOURCE_DICT,
+                    'entry_word': entry_word
+                })
+        
+        return chunks
+    
     def chunk_text(self, text: str, source: str, resource_type: str = RESOURCE_DICT) -> List[Dict]:
-        """Split text into overlapping chunks"""
+        """Split text into chunks - entry-based for dictionaries, character-based for others"""
         chunks = []
         text = text.strip()
         
-        # Clean dictionary metadata only for dictionary resources
+        # Use entry-based chunking for dictionaries
         if resource_type == RESOURCE_DICT:
-            text = self.clean_dictionary_metadata(text)
+            chunks = self.chunk_dictionary_entries(text, source)
+            # Clean metadata from each chunk
+            for chunk in chunks:
+                chunk['text'] = self.clean_dictionary_metadata(chunk['text'])
+            return chunks
         
+        # Use character-based chunking for grammar and samples
         start = 0
         
         while start < len(text):
@@ -236,6 +320,7 @@ class HunsrikRAG:
             
             print(f"📁 {folder_name}/: Processing {len(folder_files)} file(s) ({resource_type})")
             folder_chunks = 0
+            folder_entries = 0  # Track dictionary entries
             
             for file_path in folder_files:
                 if file_path.suffix.lower() == '.pdf':
@@ -249,9 +334,19 @@ class HunsrikRAG:
                     chunks = self.chunk_text(text, file_path.name, resource_type)
                     all_chunks.extend(chunks)
                     folder_chunks += len(chunks)
+                    
+                    # Count dictionary entries
+                    if resource_type == RESOURCE_DICT:
+                        entries_with_word = [c for c in chunks if c.get('entry_word')]
+                        folder_entries += len(entries_with_word)
+                    
                     total_files += 1
             
-            print(f"   → Created {folder_chunks} chunks from {folder_name}\n")
+            # Show stats
+            if resource_type == RESOURCE_DICT and folder_entries > 0:
+                print(f"   → Created {folder_chunks} chunks ({folder_entries} dictionary entries) from {folder_name}\n")
+            else:
+                print(f"   → Created {folder_chunks} chunks from {folder_name}\n")
         
         if not all_chunks:
             print("❌ No files processed!")
@@ -373,7 +468,7 @@ class HunsrikRAG:
                 # Hunsrik indicators: double vowels, umlauts, specific patterns
                 if len(word_clean) > 2:
                     has_double_vowel = any(dv in word_clean for dv in ['aa', 'ee', 'oo', 'uu', 'ii'])
-                    has_umlaut = any(u in word_clean for u in ['ä', 'ö', 'ü'])
+                    has_umlaut = any(u in word_clean for u in ['ä', 'ë', 'ï'])
                     has_german_pattern = word_clean.startswith(('ge', 'ver', 'be', 'ich', 'mein', 'de'))
                     
                     if has_double_vowel or has_umlaut or has_german_pattern:
