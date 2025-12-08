@@ -20,7 +20,7 @@ VECTOR_STORE_FILE = "hunsrik_vectors.json"
 CHUNK_SIZE = 300  # characters per chunk (smaller for dictionary entries)
 CHUNK_OVERLAP = 120  # overlap between chunks (more overlap)
 TOP_K_DICT = 25  # chunks from dictionary/grammar (increased for long sentences)
-TOP_K_SAMPLES = 8  # chunks from Hunsrik samples
+TOP_K_SAMPLES = 10  # chunks from Hunsrik samples
 LOG_FILE = "translation_log.jsonl"  # Log file for all translations
 # ----------------------------
 
@@ -36,7 +36,8 @@ class HunsrikRAG:
         self.load_vector_store()
     
     def log_query(self, input_text: str, prompt: str, response: str, 
-                  dict_chunks: List[Dict], sample_chunks: List[Dict], hunsrik_terms: List[str]):
+                  dict_chunks: List[Dict], grammar_chunks: List[Dict], 
+                  sample_chunks: List[Dict], hunsrik_terms: List[str]):
         """Log query details to file"""
         log_entry = {
             "timestamp": datetime.now().isoformat(),
@@ -56,7 +57,7 @@ class HunsrikRAG:
                         "text": chunk['text'],
                         "source": chunk['source'],
                         "similarity": chunk['similarity']
-                    } for chunk in dict_chunks if chunk.get('resource_type') == RESOURCE_GRAMMAR
+                    } for chunk in grammar_chunks
                 ],
                 "sample_texts": [
                     {
@@ -69,6 +70,7 @@ class HunsrikRAG:
             },
             "stats": {
                 "num_dict_entries": len(dict_chunks),
+                "num_grammar_entries": len(grammar_chunks),
                 "num_samples": len(sample_chunks),
                 "num_hunsrik_terms": len(hunsrik_terms)
             }
@@ -417,43 +419,48 @@ class HunsrikRAG:
                 for sim, item in similarities[:top_k]]
     
     def hybrid_retrieve(self, text: str) -> Dict[str, List[Dict]]:
-        """Intelligent hybrid retrieval: dict/grammar first, then samples for context"""
+        """Intelligent hybrid retrieval: search each word in dicts, then use results in grammar/samples"""
+        import re
+        
         # Extract individual words for dictionary lookup
         words = text.lower().replace('?', '').replace('!', '').replace('.', '').replace(',', '').split()
+        words = [w for w in words if len(w) > 2]  # Filter short words
         
-        # Create query variations
-        queries = [text, f"tradução português hunsrik: {text}"]
-        for word in words:
-            if len(word) > 2:
-                queries.append(word)
-        
-        # STEP 1: Search dictionary and grammar
+        # STEP 1: Search EACH WORD individually in dictionary only
         dict_results = {}
-        for query in queries:
-            results = self.retrieve(query, top_k=TOP_K_DICT, 
-                                  resource_types=[RESOURCE_DICT, RESOURCE_GRAMMAR])
+        for word in words:
+            results = self.retrieve(word, top_k=10, resource_types=[RESOURCE_DICT])
             for result in results:
                 text_key = result['text']
                 if text_key in dict_results:
-                    dict_results[text_key]['similarity'] += result['similarity'] * 0.3
+                    # Boost score if found with multiple words
+                    dict_results[text_key]['similarity'] += result['similarity'] * 0.4
                 else:
                     dict_results[text_key] = result
         
+        # Also search the full sentence
+        full_results = self.retrieve(text, top_k=10, resource_types=[RESOURCE_DICT])
+        for result in full_results:
+            text_key = result['text']
+            if text_key in dict_results:
+                dict_results[text_key]['similarity'] += result['similarity'] * 0.5
+            else:
+                dict_results[text_key] = result
+        
         dict_sorted = sorted(dict_results.values(), key=lambda x: x['similarity'], reverse=True)[:TOP_K_DICT]
         
-        # STEP 2: Extract Hunsrik words from dictionary results (use ALL results, not just top 5)
+        # STEP 2: Extract ALL Hunsrik words from dictionary results
         hunsrik_terms = set()
-        for result in dict_sorted:  # Use ALL dictionary results
+        for result in dict_sorted:
             text_lower = result['text'].lower()
             
-            # Method 1: Look for explicit markers like (HRX), [Hunsrik], etc.
-            import re
-            # Pattern: word after "=" or before (HRX) or Hunsrik markers
+            # Method 1: Look for explicit markers
             hrx_patterns = [
-                r'=\s*([\wäÄËë]+)',  # word = Hunsrik
-                r'\(hrx\)\s*([\wäÄËë]+)',  # (HRX) Hunsrik
-                r'([\wäÄËë]+)\s*\(hrx\)',  # Hunsrik (HRX)
-                r'hunsrik[:\s]+([\wäÄËë]+)',  # Hunsrik: word
+                r'=\s*([\wäëïÄËÏ]+)',  # word = Hunsrik
+                r'\(hrx\)\s*([\wäëïÄËÏ]+)',  # (HRX) Hunsrik
+                r'([\wäëïÄËÏ]+)\s*\(hrx\)',  # Hunsrik (HRX)
+                r'hunsrik[:\s]+([\wäëïÄËÏ]+)',  # Hunsrik: word
+                r'→\s*([\wäëïÄËÏ]+)',  # → Hunsrik
             ]
             
             for pattern in hrx_patterns:
@@ -465,28 +472,40 @@ class HunsrikRAG:
             # Method 2: Extract words with Hunsrik characteristics
             for word in result['text'].split():
                 word_clean = word.strip('.,;:()[]"!?-–—').lower()
-                # Hunsrik indicators: double vowels, umlauts, specific patterns
                 if len(word_clean) > 2:
-                    has_double_vowel = any(dv in word_clean for dv in ['aa', 'ee', 'oo', 'uu', 'ii'])
+                    has_double_vowel = any(dv in word_clean for dv in ['aa', 'ee', 'ei', 'ie', 'eu'])
                     has_umlaut = any(u in word_clean for u in ['ä', 'ë', 'ï'])
                     has_german_pattern = word_clean.startswith(('ge', 'ver', 'be', 'ich', 'mein', 'de'))
                     
                     if has_double_vowel or has_umlaut or has_german_pattern:
                         hunsrik_terms.add(word_clean)
         
-        # STEP 3: Search samples using ALL extracted Hunsrik terms
-        sample_results = {}
+        # STEP 3: Search GRAMMAR with extracted Hunsrik terms
+        grammar_results = {}
         if hunsrik_terms:
-            # Use all terms but prioritize longer, more specific ones
-            sorted_terms = sorted(hunsrik_terms, key=len, reverse=True)[:15]  # Top 15 terms
+            sorted_terms = sorted(hunsrik_terms, key=len, reverse=True)[:15]
             
             for term in sorted_terms:
-                results = self.retrieve(term, top_k=TOP_K_SAMPLES, 
-                                      resource_types=[RESOURCE_SAMPLE])
+                results = self.retrieve(term, top_k=5, resource_types=[RESOURCE_GRAMMAR])
+                for result in results:
+                    text_key = result['text']
+                    if text_key in grammar_results:
+                        grammar_results[text_key]['similarity'] += result['similarity'] * 0.2
+                    else:
+                        grammar_results[text_key] = result
+        
+        grammar_sorted = sorted(grammar_results.values(), key=lambda x: x['similarity'], reverse=True)[:8]
+        
+        # STEP 4: Search SAMPLES with extracted Hunsrik terms
+        sample_results = {}
+        if hunsrik_terms:
+            sorted_terms = sorted(hunsrik_terms, key=len, reverse=True)[:15]
+            
+            for term in sorted_terms:
+                results = self.retrieve(term, top_k=TOP_K_SAMPLES, resource_types=[RESOURCE_SAMPLE])
                 for result in results:
                     text_key = result['text']
                     if text_key in sample_results:
-                        # Boost score if same sample found with multiple terms
                         sample_results[text_key]['similarity'] += result['similarity'] * 0.2
                     else:
                         sample_results[text_key] = result
@@ -495,19 +514,21 @@ class HunsrikRAG:
         
         return {
             'dictionary': dict_sorted,
+            'grammar': grammar_sorted,
             'samples': sample_sorted,
             'hunsrik_terms': sorted_terms if hunsrik_terms else []
         }
     
     def query(self, question: str, verbose: bool = True) -> str:
-        """Query with hybrid retrieval: dictionary + samples for context"""
+        """Query with hybrid retrieval: dictionary + grammar + samples"""
         if verbose:
             print(f"\n💬 Texto para traduzir: {question}\n")
-            print("🔍 Fase 1: Buscando no dicionário e gramática...")
+            print("🔍 Fase 1: Buscando palavras individuais no dicionário...")
         
         # Use hybrid retrieval
         results = self.hybrid_retrieve(question)
         dict_chunks = results['dictionary']
+        grammar_chunks = results['grammar']
         sample_chunks = results['samples']
         hunsrik_terms = results.get('hunsrik_terms', [])
         
@@ -515,8 +536,8 @@ class HunsrikRAG:
             return "Nenhuma informação relevante encontrada. Execute 'reprocess' primeiro."
         
         if verbose:
-            print(f"   ✓ {len(dict_chunks)} entradas do dicionário/gramática")
-            for i, chunk in enumerate(dict_chunks[:10], 1):
+            print(f"   ✓ {len(dict_chunks)} entradas do dicionário")
+            for i, chunk in enumerate(dict_chunks[:5], 1):
                 preview = chunk['text'][:60].replace('\n', ' ')
                 print(f"   [{i}] Score: {chunk['similarity']:.3f} | {preview}...")
             
@@ -525,28 +546,40 @@ class HunsrikRAG:
                 if len(hunsrik_terms) > 10:
                     print(f"      ... e mais {len(hunsrik_terms) - 10} termos")
             
+            if grammar_chunks:
+                print(f"\n🔍 Fase 2: Buscando regras gramaticais...")
+                print(f"   ✓ {len(grammar_chunks)} trechos de gramática encontrados")
+            
             if sample_chunks:
-                print(f"\n🔍 Fase 2: Buscando exemplos em textos Hunsrik...")
+                print(f"\n🔍 Fase 3: Buscando exemplos em textos Hunsrik...")
                 print(f"   ✓ {len(sample_chunks)} exemplos de uso encontrados")
-                for i, chunk in enumerate(sample_chunks[:10], 1):
+                for i, chunk in enumerate(sample_chunks[:2], 1):
                     preview = chunk['text'][:60].replace('\n', ' ')
                     print(f"   [{i}] {preview}...")
         
         # Build contexts separately
         dict_context = "\n\n".join([chunk['text'] for chunk in dict_chunks])
         
+        grammar_context = ""
+        if grammar_chunks:
+            grammar_context = "\n\n=== REGRAS GRAMATICAIS ===\n"
+            grammar_context += "\n\n".join([chunk['text'] for chunk in grammar_chunks])
+            grammar_context += "\n=== FIM DAS REGRAS ==="
+        
         sample_context = ""
         if sample_chunks:
             sample_context = "\n\n=== EXEMPLOS DE USO EM CONTEXTO (textos Hunsrickisch) ===\n"
-            sample_context += "\n".join([chunk['text'][:200] for chunk in sample_chunks[:3]])
+            sample_context += "\n".join([chunk['text'][:200] for chunk in sample_chunks[:5]])
             sample_context += "\n=== FIM DOS EXEMPLOS ==="
         
         # Build prompt
         prompt = f"""Você é um tradutor especializado em hunrisqueano (Hunsrickisch). Use APENAS as informações do dicionário fornecido abaixo. NÃO invente palavras.
 
-=== DICIONÁRIO E GRAMÁTICA ===
+=== DICIONÁRIO ===
 {dict_context}
 === FIM DO DICIONÁRIO ===
+
+{grammar_context}
 
 {sample_context}
 
@@ -572,6 +605,7 @@ INSTRUÇÕES:
 2. Use a ortografia EXATA do dicionário
 3. Se não encontrar uma palavra, mantenha-a em português entre parênteses
 4. Responda APENAS com a tradução, sem explicações
+5. Traduza a frase COMPLETA.
 
 Português: "{question}"
 Hunsrickisch:"""
@@ -600,6 +634,7 @@ Hunsrickisch:"""
                 prompt=prompt,
                 response=result,
                 dict_chunks=dict_chunks,
+                grammar_chunks=grammar_chunks,
                 sample_chunks=sample_chunks,
                 hunsrik_terms=hunsrik_terms
             )
