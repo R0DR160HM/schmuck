@@ -19,14 +19,13 @@ RESOURCES_DIR = "resources"  # Base directory
 VECTOR_STORE_FILE = "hunsrik_vectors.json"
 CHUNK_SIZE = 300  # characters per chunk (smaller for dictionary entries)
 CHUNK_OVERLAP = 120  # overlap between chunks (more overlap)
-TOP_K_DICT = 25  # chunks from dictionary/grammar (increased for long sentences)
+TOP_K_DICT = 20 # chunks from dictionary (dynamic based on input)
 TOP_K_SAMPLES = 8  # chunks from Hunsrik samples
 LOG_FILE = "translation_log.jsonl"  # Log file for all translations
 # ----------------------------
 
 # Resource types
 RESOURCE_DICT = "dictionary"
-RESOURCE_GRAMMAR = "grammar"
 RESOURCE_SAMPLE = "sample"
 
 
@@ -50,13 +49,6 @@ class HunsrikRAG:
                         "source": chunk['source'],
                         "similarity": chunk['similarity']
                     } for chunk in dict_chunks
-                ],
-                "grammar_entries": [
-                    {
-                        "text": chunk['text'],
-                        "source": chunk['source'],
-                        "similarity": chunk['similarity']
-                    } for chunk in dict_chunks if chunk.get('resource_type') == RESOURCE_GRAMMAR
                 ],
                 "sample_texts": [
                     {
@@ -119,24 +111,35 @@ class HunsrikRAG:
         return text
     
     def clean_dictionary_metadata(self, text: str) -> str:
-        """Remove dictionary-specific metadata that confuses the model"""
+        """Convert dictionary metadata to readable format"""
         import re
         
-        # Dictionary metadata patterns to remove
-        metadata_patterns = [
+        # Convert grammatical categories to readable format
+        grammar_map = {
+            'sf': '[substantivo feminino]', 'sm': '[substantivo masculino]', 'sn': '[substantivo neutro]',
+            'adj': '[adjetivo]', 'adv': '[advérbio]', 'v': '[verbo]',
+            'vt': '[verbo transitivo]', 'vi': '[verbo intransitivo]',
+            'prep': '[preposição]', 'conj': '[conjunção]',
+            'interj': '[interjeição]', 'pron': '[pronome]', 'num': '[numeral]'
+        }
+        
+        cleaned = text
+        
+        # Replace grammatical categories
+        for abbr, full in grammar_map.items():
+            cleaned = re.sub(r'\b' + abbr + r'\b', full, cleaned, flags=re.IGNORECASE)
+        
+        # Remove patterns that add noise
+        remove_patterns = [
             r'/[^/]+/',  # Phonetic transcriptions like /ˈɔːpaˌhoːa/
-            r'\b(sf|sm|sn|adj|adv|v|vt|vi|prep|conj|interj|pron|num)\b',  # Grammatical categories
             r'\b(nie|gmc|gmf|gml|gmh|gml|gmo|gmw|grc|hno|inc)\b',  # Ethymologies
-            r'\b(pl|sing|masc|fem|neut)\b',  # Number and gender markers
             r'\b(Anat|Geog|Bot|Pop|Zool|Med|Culin|Arquit|Meteor|Agric|Relig|Econ|Pol|Hist|NP)\b',  # Domain markers
             r'\bSin\b',  # Synonym marker
             r'\b§\b',  # Example marker
-            r'\bgmf\b',  # GMF marker
             r'\(pl\s+\w+\)',  # Plural forms in parentheses like (pl Aaperhore)
         ]
         
-        cleaned = text
-        for pattern in metadata_patterns:
+        for pattern in remove_patterns:
             cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
         
         # Remove multiple spaces and clean up
@@ -237,7 +240,7 @@ class HunsrikRAG:
                 chunk['text'] = self.clean_dictionary_metadata(chunk['text'])
             return chunks
         
-        # Use character-based chunking for grammar and samples
+        # Use character-based chunking for samples
         start = 0
         
         while start < len(text):
@@ -261,7 +264,9 @@ class HunsrikRAG:
                     'start_pos': start
                 })
             
-            start = end - CHUNK_OVERLAP
+            # Proportional overlap: max 1/3 of chunk size
+            overlap = min(CHUNK_OVERLAP, len(chunk) // 3)
+            start = end - overlap
         
         return chunks
     
@@ -293,7 +298,6 @@ class HunsrikRAG:
         # Define folder mappings
         folder_types = {
             'dicts': RESOURCE_DICT,
-            'grammar': RESOURCE_GRAMMAR,
             'samples': RESOURCE_SAMPLE,
         }
         
@@ -416,94 +420,146 @@ class HunsrikRAG:
                 'resource_type': item.get('resource_type', 'unknown'), 'similarity': sim} 
                 for sim, item in similarities[:top_k]]
     
+    def retrieve_with_keyword_boost(self, query: str, top_k: int = 15, resource_types: List[str] = None) -> List[Dict]:
+        """Retrieve with keyword boost for exact matches"""
+        results = self.retrieve(query, top_k * 2, resource_types)
+        
+        # Boost chunks that contain the query word exactly
+        query_lower = query.lower()
+        for result in results:
+            if query_lower in result['text'].lower():
+                result['similarity'] *= 1.5  # 50% boost for exact keyword match
+        
+        # Re-sort and return top_k
+        results.sort(key=lambda x: x['similarity'], reverse=True)
+        return results[:top_k]
+    
     def hybrid_retrieve(self, text: str) -> Dict[str, List[Dict]]:
-        """Intelligent hybrid retrieval: dict/grammar first, then samples for context"""
+        """Intelligent hybrid retrieval: dictionary first, then samples for context"""
         # Extract individual words for dictionary lookup
         words = text.lower().replace('?', '').replace('!', '').replace('.', '').replace(',', '').split()
+        content_words = [w for w in words if len(w) > 2]
         
-        # Create query variations
-        queries = [text, f"tradução português hunsrik: {text}"]
-        for word in words:
-            if len(word) > 2:
-                queries.append(word)
+        # Create query variations (more focused)
+        queries = [text]  # Full text query
+        for word in content_words:
+            queries.append(word)
         
-        # STEP 1: Search dictionary and grammar
+        # STEP 1: Search dictionary with keyword boost
         dict_results = {}
         for query in queries:
-            results = self.retrieve(query, top_k=TOP_K_DICT, 
-                                  resource_types=[RESOURCE_DICT, RESOURCE_GRAMMAR])
+            results = self.retrieve_with_keyword_boost(query, top_k=10, 
+                                  resource_types=[RESOURCE_DICT])
             for result in results:
                 text_key = result['text']
                 if text_key in dict_results:
-                    dict_results[text_key]['similarity'] += result['similarity'] * 0.3
+                    # Increment match count and keep best similarity
+                    dict_results[text_key]['match_count'] += 1
+                    dict_results[text_key]['similarity'] = max(
+                        dict_results[text_key]['similarity'], 
+                        result['similarity']
+                    )
                 else:
+                    result['match_count'] = 1
                     dict_results[text_key] = result
         
-        dict_sorted = sorted(dict_results.values(), key=lambda x: x['similarity'], reverse=True)[:TOP_K_DICT]
+        # Sort by match_count first, then similarity
+        # Dynamic THunsrikOP_K based on input length
+        dynamic_top_k = max(TOP_K_DICT, len(content_words))
+        dict_sorted = sorted(
+            dict_results.values(), 
+            key=lambda x: (x['match_count'], x['similarity']), 
+            reverse=True
+        )[:dynamic_top_k]
         
-        # STEP 2: Extract Hunsrik words from dictionary results (use ALL results, not just top 5)
+        # STEP 2: Extract Hunsrik words from ALL dictionary results
         hunsrik_terms = set()
-        for result in dict_sorted:  # Use ALL dictionary results
+        pt_stopwords = {'de', 'da', 'do', 'das', 'dos', 'para', 'com', 'sem', 'por', 'em', 'um', 'uma', 'ter', 'ser', 'estar'}
+        
+        import re
+        
+        # Extract from ALL dict_results, not just top k
+        for result in dict_results.values():
             text_lower = result['text'].lower()
             
-            # Method 1: Look for explicit markers like (HRX), [Hunsrik], etc.
-            import re
-            # Pattern: word after "=" or before (HRX) or Hunsrik markers
-            hrx_patterns = [
-                r'=\s*([\wäÄËë]+)',  # word = Hunsrik
-                r'\(hrx\)\s*([\wäÄËë]+)',  # (HRX) Hunsrik
-                r'([\wäÄËë]+)\s*\(hrx\)',  # Hunsrik (HRX)
-                r'hunsrik[:\s]+([\wäÄËë]+)',  # Hunsrik: word
-            ]
+            # Method 1: Extract Hunsrik words based on arrow marker or first word
+            if '→' in result['text'] or '->' in result['text']:
+                # All words to the right of the arrow are Hunsrik
+                arrow_split = re.split(r'→|->|→', result['text'])
+                if len(arrow_split) > 1:
+                    right_side = arrow_split[1]
+                    # Extract all words from the right side (before grammatical markers)
+                    # Stop at first [ or ( to avoid getting metadata
+                    right_side = re.split(r'[\[\(]', right_side)[0]
+                    words = re.findall(r'[\wäÄËëÏïÖöÜü]+', right_side)
+                    for word in words:
+                        word_clean = word.strip().lower()
+                        if len(word_clean) > 1 and word_clean not in pt_stopwords:
+                            hunsrik_terms.add(word_clean)
+            else:
+                # Just the first word of the chunk is Hunsrik
+                words = re.findall(r'[\wäÄËëÏïÖöÜü]+', result['text'])
+                if words:
+                    first_word = words[0].strip().lower()
+                    if len(first_word) > 1:
+                        hunsrik_terms.add(first_word)
             
-            for pattern in hrx_patterns:
-                matches = re.findall(pattern, text_lower, re.IGNORECASE)
-                for match in matches:
-                    if len(match) > 2:
-                        hunsrik_terms.add(match.strip())
-            
-            # Method 2: Extract words with Hunsrik characteristics
+            # Method 2: Extract words with Hunsrik characteristics (with scoring)
             for word in result['text'].split():
                 word_clean = word.strip('.,;:()[]"!?-–—').lower()
-                # Hunsrik indicators: double vowels, umlauts, specific patterns
-                if len(word_clean) > 2:
-                    has_double_vowel = any(dv in word_clean for dv in ['aa', 'ee', 'oo', 'uu', 'ii'])
-                    has_umlaut = any(u in word_clean for u in ['ä', 'ë', 'ï'])
-                    has_german_pattern = word_clean.startswith(('ge', 'ver', 'be', 'ich', 'mein', 'de'))
+                if len(word_clean) > 2 and word_clean not in pt_stopwords:
+                    score = 0
                     
-                    if has_double_vowel or has_umlaut or has_german_pattern:
+                    # Hunsrik indicators with weights
+                    if any(dv in word_clean for dv in ['aa', 'ee', 'oo', 'uu', 'ei', 'au', 'eu', 'w', 'pp', 'bb', 'tz', 'ff']):
+                        score += 2  # Strong indicator
+                    if 'sch' in word_clean:
+                        score += 2
+                    if any(u in word_clean for u in ['ä', 'ë', 'ï']):
+                        score += 3  # Very strong indicator
+                    if word_clean.startswith(('ge', 'ver', 'be', 'fer', 'en', 'un', 'ich', 'mein', 'dein')):
+                        score += 1
+                    
+                    # Require score >= 2 to avoid Portuguese false positives
+                    if score >= 2:
                         hunsrik_terms.add(word_clean)
         
         # STEP 3: Search samples using ALL extracted Hunsrik terms
         sample_results = {}
-        if hunsrik_terms:
-            # Use all terms but prioritize longer, more specific ones
-            sorted_terms = sorted(hunsrik_terms, key=len, reverse=True)[:15]  # Top 15 terms
-            
-            for term in sorted_terms:
-                results = self.retrieve(term, top_k=TOP_K_SAMPLES, 
-                                      resource_types=[RESOURCE_SAMPLE])
-                for result in results:
-                    text_key = result['text']
-                    if text_key in sample_results:
-                        # Boost score if same sample found with multiple terms
-                        sample_results[text_key]['similarity'] += result['similarity'] * 0.2
-                    else:
-                        sample_results[text_key] = result
+        
+        # Fallback: if no Hunsrik terms found, use original words
+        if not hunsrik_terms:
+            hunsrik_terms = set(content_words)
+        
+        # Use all terms but prioritize longer, more specific ones
+        sorted_terms = sorted(hunsrik_terms, key=len, reverse=True)[:15]  # Top 15 terms
+        
+        for term in sorted_terms:
+            results = self.retrieve(term, top_k=TOP_K_SAMPLES, 
+                                  resource_types=[RESOURCE_SAMPLE])
+            for result in results:
+                text_key = result['text']
+                if text_key in sample_results:
+                    # Boost score if same sample found with multiple terms
+                    sample_results[text_key]['similarity'] += result['similarity'] * 0.2
+                else:
+                    sample_results[text_key] = result
         
         sample_sorted = sorted(sample_results.values(), key=lambda x: x['similarity'], reverse=True)[:TOP_K_SAMPLES]
         
         return {
             'dictionary': dict_sorted,
             'samples': sample_sorted,
-            'hunsrik_terms': sorted_terms if hunsrik_terms else []
+            'hunsrik_terms': sorted_terms
         }
     
     def query(self, question: str, verbose: bool = True) -> str:
         """Query with hybrid retrieval: dictionary + samples for context"""
+        import re
+        
         if verbose:
             print(f"\n💬 Texto para traduzir: {question}\n")
-            print("🔍 Fase 1: Buscando no dicionário e gramática...")
+            print("🔍 Fase 1: Buscando no dicionário...")
         
         # Use hybrid retrieval
         results = self.hybrid_retrieve(question)
@@ -515,7 +571,7 @@ class HunsrikRAG:
             return "Nenhuma informação relevante encontrada. Execute 'reprocess' primeiro."
         
         if verbose:
-            print(f"   ✓ {len(dict_chunks)} entradas do dicionário/gramática")
+            print(f"   ✓ {len(dict_chunks)} entradas do dicionário")
             for i, chunk in enumerate(dict_chunks[:10], 1):
                 preview = chunk['text'][:60].replace('\n', ' ')
                 print(f"   [{i}] Score: {chunk['similarity']:.3f} | {preview}...")
@@ -535,20 +591,45 @@ class HunsrikRAG:
         # Build contexts separately
         dict_context = "\n\n".join([chunk['text'] for chunk in dict_chunks])
         
+        # Generate dynamic examples from samples
         sample_context = ""
+        dynamic_examples = ""
+        
         if sample_chunks:
             sample_context = "\n\n=== EXEMPLOS DE USO EM CONTEXTO (textos Hunsrickisch) ===\n"
             sample_context += "\n".join([chunk['text'][:200] for chunk in sample_chunks[:3]])
             sample_context += "\n=== FIM DOS EXEMPLOS ==="
+            
+            # Extract 2-3 sentences from samples as dynamic examples
+            dynamic_examples = "\n\n=== EXEMPLOS DE FRASES REAIS ===\n"
+            example_count = 0
+            for chunk in sample_chunks[:5]:
+                # Try to extract complete sentences
+                sentences = re.split(r'[.!?]+', chunk['text'])
+                for sent in sentences:
+                    sent = sent.strip()
+                    if 20 < len(sent) < 100 and example_count < 3:
+                        dynamic_examples += f"Exemplo: {sent}\n"
+                        example_count += 1
+            dynamic_examples += "=== FIM DOS EXEMPLOS ==="
         
         # Build prompt
         prompt = f"""Você é um tradutor especializado em hunrisqueano (Hunsrickisch). Use APENAS as informações do dicionário fornecido abaixo. NÃO invente palavras.
 
-=== DICIONÁRIO E GRAMÁTICA ===
+=== DICIONÁRIO ===
 {dict_context}
 === FIM DO DICIONÁRIO ===
 
 {sample_context}
+
+{dynamic_examples}
+
+INSTRUÇÕES:
+1. Procure cada palavra no dicionário acima
+2. Use a ortografia do dicionário
+3. Use os exemplos como guia para estrutura das frases
+4. Responda APENAS com a tradução, sem explicações
+5. Traduza a frase COMPLETA, mantendo a estrutura original
 
 === EXEMPLOS DE TRADUÇÕES ===
 Português: "Meu nome é Maria"
@@ -566,12 +647,6 @@ Hunsrickisch: "Alles gud?"
 Português: "Onde está o Pedro?"
 Hunsrickisch: "Wo is de Pedro?"
 === FIM DOS EXEMPLOS ===
-
-INSTRUÇÕES:
-1. Procure cada palavra no dicionário acima
-2. Use a ortografia EXATA do dicionário
-3. Se não encontrar uma palavra, mantenha-a em português entre parênteses
-4. Responda APENAS com a tradução, sem explicações
 
 Português: "{question}"
 Hunsrickisch:"""
